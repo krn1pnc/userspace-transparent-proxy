@@ -1,0 +1,16 @@
+BasedOnStyle: LLVM
+
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: true
+AlignOperands: AlignAfterOperator
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBinaryOperators: All
+BreakBeforeTernaryOperators: true
+ColumnLimit: 0
+NamespaceIndentation: All
+IndentWidth: 4
