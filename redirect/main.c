@@ -13,11 +13,22 @@
 #include <time.h>
 #include <unistd.h>
 
-static volatile sig_atomic_t should_stop = 0;
-
-void signal_handler_stop(int signum) { should_stop = 1; }
-
 const char *LOG_DIR = "./log";
+const int DIRECT_MARK = 0x0416;
+
+static volatile sig_atomic_t should_stop = 0;
+void signal_handler_stop(int signum) { should_stop = 1; }
+int set_signal_handler() {
+    struct sigaction sa;
+    sa.sa_handler = signal_handler_stop;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) {
+        perror("sigaction() failed");
+        return -1;
+    }
+    return 0;
+}
 
 void format_addr(const struct sockaddr_in *addr, char *res, size_t len) {
     snprintf(res, len, "%s:%d", inet_ntoa(addr->sin_addr), ntohs(addr->sin_port));
@@ -42,15 +53,22 @@ int setup_nftables(int port) {
 void cleanup_nftables() { system("nft delete table ip chocomint"); }
 
 int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const struct sockaddr_in *dst_addr) {
-    int connid = rand();
+    int connid;
     char errmsg[64];
-
     char src_addr_str[64], dst_addr_str[64];
+    int server_fd;
+    char log_filename[256];
+    FILE *log_fp;
+    int epoll_fd;
+    struct epoll_event ev;
+    ssize_t up_bytes, down_bytes;
+
+    connid = rand();
+
     format_addr(src_addr, src_addr_str, sizeof(src_addr_str));
     format_addr(dst_addr, dst_addr_str, sizeof(dst_addr_str));
     printf("[%d] New connection: %s -> %s\n", connid, src_addr_str, dst_addr_str);
 
-    int server_fd;
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         sprintf(errmsg, "[%d] socket() failed", connid);
         perror(errmsg);
@@ -58,8 +76,7 @@ int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const s
         exit(1);
     }
 
-    int direct_mark = 0x0416;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_MARK, &direct_mark, sizeof(direct_mark)) < 0) {
+    if (setsockopt(server_fd, SOL_SOCKET, SO_MARK, &DIRECT_MARK, sizeof(DIRECT_MARK)) < 0) {
         sprintf(errmsg, "[%d] setsockopt() failed", connid);
         perror(errmsg);
 
@@ -75,30 +92,27 @@ int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const s
         exit(1);
     }
 
-    char filename[256];
-    sprintf(filename, "%s/%d_%s_to_%s.log", LOG_DIR, connid, src_addr_str, dst_addr_str);
+    sprintf(log_filename, "%s/%d_%s_to_%s.log", LOG_DIR, connid, src_addr_str, dst_addr_str);
 
     mkdir(LOG_DIR, 0755);
-    FILE *log_file = fopen(filename, "wb");
-    if (!log_file) {
+
+    log_fp = fopen(log_filename, "wb");
+    if (!log_fp) {
         sprintf(errmsg, "[%d] fopen() failed", connid);
         perror(errmsg);
 
         close(server_fd);
         exit(1);
     }
-
-    int epoll_fd;
     if ((epoll_fd = epoll_create1(0)) < 0) {
         sprintf(errmsg, "[%d] epoll_create1() failed", connid);
         perror(errmsg);
 
-        fclose(log_file);
+        fclose(log_fp);
         close(server_fd);
         exit(1);
     }
 
-    struct epoll_event ev;
     ev.events = EPOLLIN;
     ev.data.fd = client_fd;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
@@ -106,7 +120,7 @@ int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const s
         perror(errmsg);
 
         close(epoll_fd);
-        fclose(log_file);
+        fclose(log_fp);
         close(server_fd);
         exit(1);
     }
@@ -118,12 +132,11 @@ int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const s
         perror(errmsg);
 
         close(epoll_fd);
-        fclose(log_file);
+        fclose(log_fp);
         close(server_fd);
         exit(1);
     }
 
-    ssize_t up_bytes = 0, down_bytes = 0;
     while (true) {
         struct epoll_event e[2];
         int ne;
@@ -152,9 +165,9 @@ int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const s
                     end_listen = true;
                     break;
                 }
-                fprintf(log_file, ">>> %lu bytes\n", n);
-                fwrite(buf, sizeof(char), n, log_file);
-                fputc('\n', log_file);
+                fprintf(log_fp, ">>> %lu bytes\n", n);
+                fwrite(buf, sizeof(char), n, log_fp);
+                fputc('\n', log_fp);
             } else if (cfd == server_fd) {
                 ssize_t n = read(server_fd, buf, sizeof(buf));
                 if (n <= 0) {
@@ -169,9 +182,9 @@ int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const s
                     end_listen = true;
                     break;
                 }
-                fprintf(log_file, "<<< %lu bytes\n", n);
-                fwrite(buf, sizeof(char), n, log_file);
-                fputc('\n', log_file);
+                fprintf(log_fp, "<<< %lu bytes\n", n);
+                fwrite(buf, sizeof(char), n, log_fp);
+                fputc('\n', log_fp);
             }
         }
 
@@ -181,98 +194,93 @@ int handle_connection(int client_fd, const struct sockaddr_in *src_addr, const s
     printf("[%d] %s -> %s >>>%lu <<<%lu\n", connid, src_addr_str, dst_addr_str, up_bytes, down_bytes);
 
     close(epoll_fd);
-    fclose(log_file);
+    fclose(log_fp);
     close(server_fd);
     return 0;
 }
 
 int main(int argc, char **argv) {
-    struct sigaction sa;
-    sa.sa_handler = signal_handler_stop;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) {
-        perror("sigaction failed");
-        return -1;
-    }
+    if (set_signal_handler() < 0) return 1;
 
     int listen_fd;
-    if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("socket() failed");
-        return 1;
-    }
-
     struct sockaddr_in listen_addr;
     socklen_t listen_addr_len = sizeof(listen_addr);
+    char listen_addr_str[32];
+    int listen_port;
+    int ret;
+
+    if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        printf("socker() failed: %s\n", strerrordesc_np(errno)), ret = 1;
+        goto FREE;
+    }
 
     memset(&listen_addr, 0, sizeof(listen_addr));
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     listen_addr.sin_port = htonl(0);
     if (bind(listen_fd, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
-        perror("bind() failed");
-        close(listen_fd);
-        return 1;
+        perror("bind() failed"), ret = 1;
+        goto FREE_LISTEN_FD;
     }
 
     if (listen(listen_fd, 16) < 0) {
-        perror("listen() failed");
-        close(listen_fd);
-        return 1;
+        perror("listen() failed"), ret = 1;
+        goto FREE_LISTEN_FD;
     }
 
     if (getsockname(listen_fd, (struct sockaddr *)&listen_addr, &listen_addr_len) < 0) {
-        perror("getsockname() failed");
-        close(listen_fd);
-        return 1;
+        perror("getsockname() failed"), ret = 1;
+        goto FREE_LISTEN_FD;
     }
 
-    char listen_addr_str[32];
     format_addr(&listen_addr, listen_addr_str, sizeof(listen_addr_str));
     printf("listen on %s\n", listen_addr_str);
 
-    int listen_port = ntohs(listen_addr.sin_port);
+    listen_port = ntohs(listen_addr.sin_port);
 
-    int ret;
     if ((ret = setup_nftables(listen_port)) != 0) {
         printf("failed to setup nftables\n");
-        cleanup_nftables();
-        close(listen_fd);
-        return ret;
+        goto FREE_NFTABLES;
     }
 
     while (!should_stop) {
         int client_fd;
         struct sockaddr_in client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
+        struct sockaddr_in server_addr;
+        socklen_t server_addr_len = sizeof(server_addr);
+        pid_t pid;
+
         if ((client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_addr_len)) < 0) {
             perror("accept() failed");
             continue;
         }
 
-        struct sockaddr_in orig_dst;
-        socklen_t orig_dst_len = sizeof(orig_dst);
-        if (getsockopt(client_fd, SOL_IP, SO_ORIGINAL_DST, &orig_dst, &orig_dst_len)) {
+        if (getsockopt(client_fd, SOL_IP, SO_ORIGINAL_DST, &server_addr, &server_addr_len)) {
             perror("getsockopt() failed");
             continue;
         }
 
-        pid_t pid = fork();
+        pid = fork();
         if (pid < 0) {
             perror("fork() failed");
-            close(client_fd);
-            continue;
+            goto FREE_CLIENT_FD;
         }
+
         if (pid == 0) {
             close(listen_fd);
-            handle_connection(client_fd, &client_addr, &orig_dst);
+            handle_connection(client_fd, &client_addr, &server_addr);
             return 0;
-        } else {
-            close(client_fd);
         }
+
+    FREE_CLIENT_FD:
+        close(client_fd);
     }
 
+FREE_NFTABLES:
     cleanup_nftables();
+FREE_LISTEN_FD:
     close(listen_fd);
-    return 0;
+FREE:
+    return ret;
 }
