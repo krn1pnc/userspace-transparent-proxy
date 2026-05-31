@@ -416,7 +416,6 @@ void handle_client_packet(int listen_fd) {
 
         memset(&ev, 0, sizeof(ev));
         ev.events = EPOLLIN;
-        ev.data.fd = c->up_fd;
         ev.data.ptr = c;
         if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, c->up_fd, &ev) < 0) {
             log_error_info("up epollctl() failed");
