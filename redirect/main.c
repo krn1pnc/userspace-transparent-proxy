@@ -31,6 +31,8 @@ void log_info(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[INFO] %s\n", msg);
+
+    va_end(args);
 }
 
 void log_info_pid(const char *fmt, ...) {
@@ -40,6 +42,8 @@ void log_info_pid(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[INFO pid=%d] %s\n", getpid(), msg);
+
+    va_end(args);
 }
 
 void log_error(const char *fmt, ...) {
@@ -49,6 +53,8 @@ void log_error(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[ERROR] %s\n", msg);
+
+    va_end(args);
 }
 
 void log_error_info(const char *fmt, ...) {
@@ -58,6 +64,8 @@ void log_error_info(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[ERROR name=%s desc=\"%s\"] %s\n", strerrorname_np(errno), strerrordesc_np(errno), msg);
+
+    va_end(args);
 }
 
 void log_error_info_pid(const char *fmt, ...) {
@@ -67,6 +75,8 @@ void log_error_info_pid(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[ERROR pid=%d name=%s desc=\"%s\"] %s\n", getpid(), strerrorname_np(errno), strerrordesc_np(errno), msg);
+
+    va_end(args);
 }
 
 int set_signal_handler() {

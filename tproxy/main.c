@@ -38,6 +38,8 @@ void log_info(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[INFO] %s\n", msg);
+
+    va_end(args);
 }
 
 void log_info_pid(const char *fmt, ...) {
@@ -47,6 +49,8 @@ void log_info_pid(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[INFO pid=%d] %s\n", getpid(), msg);
+
+    va_end(args);
 }
 
 void log_error(const char *fmt, ...) {
@@ -56,6 +60,8 @@ void log_error(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[ERROR] %s\n", msg);
+
+    va_end(args);
 }
 
 void log_error_info(const char *fmt, ...) {
@@ -65,6 +71,8 @@ void log_error_info(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[ERROR name=%s desc=\"%s\"] %s\n", strerrorname_np(errno), strerrordesc_np(errno), msg);
+
+    va_end(args);
 }
 
 void log_error_info_pid(const char *fmt, ...) {
@@ -74,6 +82,8 @@ void log_error_info_pid(const char *fmt, ...) {
     char msg[BUF_SIZE];
     vsnprintf(msg, sizeof(msg), fmt, args);
     printf("[ERROR pid=%d name=%s desc=\"%s\"] %s\n", getpid(), strerrorname_np(errno), strerrordesc_np(errno), msg);
+
+    va_end(args);
 }
 
 struct list_node {
@@ -147,7 +157,7 @@ struct list_node *hashmap_set(const struct hash_key *k, struct list_node *v) {
         memset(p, 0, sizeof(struct list_node));
         p->data = (void *)pkv;
         if (!hashmap_head[h]) hashmap_head[h] = p;
-        else list_insert(p, hashmap_head[h]);
+        else list_insert(p, hashmap_head[h]), hashmap_head[h] = p;
         return NULL;
     }
 }
@@ -163,7 +173,7 @@ struct list_node *hashmap_delete(const struct hash_key *k) {
     free(pkv);
 
     list_delete(p);
-    if (p == hashmap_head[h]) hashmap_head[h] = NULL;
+    if (p == hashmap_head[h]) hashmap_head[h] = p->nxt;
     free(p);
 
     return v;
@@ -183,6 +193,7 @@ struct udp_conn {
 struct lru_item {
     time_t last_active;
     struct udp_conn *data;
+    struct hash_key k;
 };
 
 struct list_node lru_list;
@@ -194,10 +205,10 @@ struct udp_conn *lru_get(struct hash_key *k) {
     return p ? ((struct lru_item *)p->data)->data : NULL;
 }
 
-void lru_set(struct hash_key *k, struct udp_conn *v) {
+void lru_set(const struct hash_key *k, struct udp_conn *v) {
     struct lru_item *it = malloc(sizeof(struct lru_item));
     memset(it, 0, sizeof(struct lru_item));
-    it->last_active = time(NULL), it->data = v;
+    it->last_active = time(NULL), it->data = v, it->k = *k;
 
     struct list_node *p = malloc(sizeof(struct list_node));
     memset(p, 0, sizeof(struct list_node));
@@ -220,13 +231,14 @@ int lru_touch(struct hash_key *k) {
 
 void lru_remove_expired(void (*cb)(struct udp_conn *v)) {
     time_t now = time(NULL);
-    struct list_node *p = lru_list.nxt;
+    struct list_node *p = lru_list.pre;
     while (p != &lru_list && now - ((struct lru_item *)p->data)->last_active > LRU_EXPIRE_AFTER) {
         struct lru_item *it = p->data;
         cb(it->data); // released
+        hashmap_delete(&it->k);
         free(it);
 
-        struct list_node *nxt = p->nxt;
+        struct list_node *nxt = p->pre;
         list_delete(p);
         free(p);
         p = nxt;
@@ -293,9 +305,11 @@ void handle_client_packet(int listen_fd) {
     socklen_t server_addr_len = sizeof(server_addr);
     char server_addr_str[BUF_SIZE];
 
-    size_t n, m;
+    ssize_t n, m;
     struct udp_conn *c;
     char log_filename[BUF_SIZE];
+
+    FILE *log_fp = NULL;
 
     struct iovec iov = {.iov_base = data, .iov_len = sizeof(data)};
     struct msghdr msg = {
@@ -326,7 +340,7 @@ void handle_client_packet(int listen_fd) {
     }
     sprintf(log_filename, "%s/%ld_%s_up", LOG_DIR, time(NULL), server_addr_str);
     log_info("send %zu bytes to %s, saving to %s", n, server_addr_str, log_filename);
-    FILE *log_fp = fopen(log_filename, "wb");
+    log_fp = fopen(log_filename, "wb");
     if (!log_fp) log_error_info("fopen() failed");
 
     if (log_fp) fwrite(data, sizeof(char), n, log_fp);
@@ -383,7 +397,7 @@ void handle_client_packet(int listen_fd) {
             log_error_info("down setsockopt(SO_MARK) failed");
             goto ERROR_DOWN_FD;
         }
-        if (setsockopt(c->down_fd, SOL_SOCKET, SO_REUSEADDR, &DIRECT_MARK, sizeof(DIRECT_MARK)) < 0) {
+        if (setsockopt(c->down_fd, SOL_SOCKET, SO_REUSEADDR, &ENABLE, sizeof(ENABLE)) < 0) {
             log_error_info("down setsockopt(SO_REUSEADDR) failed");
             goto ERROR_DOWN_FD;
         }
@@ -454,7 +468,8 @@ void handle_server_packet(const struct udp_conn *c) {
         .msg_control = NULL,
         .msg_controllen = 0,
     };
-    size_t n, m;
+    ssize_t n, m;
+    FILE *log_fp = NULL;
 
     n = recvmsg(c->up_fd, &msg, 0);
     if (n < 0) {
@@ -468,7 +483,7 @@ void handle_server_packet(const struct udp_conn *c) {
     }
     sprintf(log_filename, "%s/%ld_%s_down", LOG_DIR, time(NULL), server_addr_str);
     log_info("recv %zu bytes from %s, saving to %s", n, server_addr_str, log_filename);
-    FILE *log_fp = fopen(log_filename, "wb");
+    log_fp = fopen(log_filename, "wb");
     if (!log_fp) log_error_info("fopen() failed");
 
     if (log_fp) fwrite(data, sizeof(char), n, log_fp);
